@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+hitran_data_cache/
+output/
+logs/
+*.log
+dist/
+build/
+*.spec.bak
+config.json
+.idea/
+.vscode/

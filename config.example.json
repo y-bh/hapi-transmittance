@@ -1,0 +1,51 @@
+{
+  "band": {
+    "wavelength_min_um": 8.9,
+    "wavelength_max_um": 11.0
+  },
+  "simulation": {
+    "wavenumber_step": 0.01,
+    "instrument_resolution": 0.5,
+    "path_length_cm": 1000000.0,
+    "temperature_k": 296.0,
+    "pressure_atm": 1.0,
+    "wavenumber_wing": 25.0,
+    "tau_line_min": 0.0001,
+    "slit_function": "gaussian"
+  },
+  "molecules": [
+    { "name": "H2O", "M": 1, "I": 1 },
+    { "name": "CO2", "M": 2, "I": 1 },
+    { "name": "O3", "M": 3, "I": 1 },
+    { "name": "N2O", "M": 4, "I": 1 },
+    { "name": "CH4", "M": 6, "I": 1 }
+  ],
+  "components": {
+    "H2O": 0.01,
+    "CO2": 0.0004,
+    "O3": 0.000001,
+    "N2O": 0.0000003,
+    "CH4": 0.0000018
+  },
+  "diluent": {
+    "air": 1.0
+  },
+  "network": {
+    "use_proxy": false,
+    "proxy": "http://127.0.0.1:7890",
+    "api_key": "",
+    "timeout_s": 120.0,
+    "max_retries": 3
+  },
+  "paths": {
+    "cache_dir": "hitran_data_cache",
+    "output_dir": "output"
+  },
+  "output": {
+    "timestamped_subdir": true,
+    "save_png": true,
+    "save_csv": true,
+    "save_txt": true,
+    "png_dpi": 300
+  }
+}
