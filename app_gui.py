@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tkinter 图形界面：左侧侧边栏导航 + 右侧功能页。
+"""Tkinter 图形界面：左侧浅蓝侧边栏 + 右侧白色功能页。
 
 包含清晰度修复（DPI 感知 + 统一字体）、输出目录管理页、日志预览页。
 计算在后台线程执行，通过队列把进度与日志传回主线程。
@@ -55,8 +55,19 @@ if DATA_DIR != BASE_DIR:
     logger.warning("程序目录不可写，配置/缓存/输出/日志将保存到 %s", DATA_DIR)
 
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 MAX_LOG_LINES = 5000
+
+# 配色：浅蓝 + 白
+BG_MAIN = "#ffffff"
+BG_SIDEBAR = "#dce9f7"
+BG_SIDEBAR_ACTIVE = "#ffffff"
+ACCENT = "#2f6fb3"
+BORDER = "#b7d0ea"
+BUTTON_BG = "#e7f1fa"
+BUTTON_ACTIVE = "#d4e6f7"
+TEXT = "#202020"
+SUBTLE = "#5a6b7d"
 
 
 def enable_dpi_awareness() -> None:
@@ -114,8 +125,8 @@ class App:
         self._history_dirs = []
 
         root.title("HAPI 大气透过率仿真")
-        root.geometry("1020x720")
-        root.minsize(900, 640)
+        root.geometry("1020x740")
+        root.minsize(920, 660)
 
         self._setup_style()
         self._build_layout()
@@ -124,23 +135,80 @@ class App:
         root.after(120, self._poll)
 
     # ---------------------------------------------------------------- style
+    def _style_conf(self, widget: str, **opts) -> None:
+        try:
+            self.style.configure(widget, **opts)
+        except Exception:
+            pass
+
     def _setup_style(self) -> None:
         self.font = ("Microsoft YaHei UI", 10)
         self.style = ttk.Style(self.root)
         try:
-            self.style.theme_use("vista")
+            self.style.theme_use("clam")
         except Exception:
             pass
-        for widget in (
-            "TLabel",
-            "TButton",
-            "TEntry",
-            "TCombobox",
-            "TCheckbutton",
-            "TRadiobutton",
+
+        self._style_conf("TFrame", background=BG_MAIN)
+        self._style_conf("TLabel", background=BG_MAIN, foreground=TEXT)
+        self._style_conf(
+            "Heading.TLabel",
+            background=BG_MAIN,
+            foreground=ACCENT,
+            font=("Microsoft YaHei UI", 13, "bold"),
+        )
+        self._style_conf(
+            "TLabelframe",
+            background=BG_MAIN,
+            bordercolor=BORDER,
+            relief="solid",
+        )
+        self._style_conf(
             "TLabelframe.Label",
-        ):
-            self.style.configure(widget, font=self.font)
+            background=BG_MAIN,
+            foreground=ACCENT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        )
+        self._style_conf(
+            "TButton",
+            background=BUTTON_BG,
+            foreground=TEXT,
+            bordercolor=BORDER,
+            borderwidth=1,
+            relief="flat",
+            padding=(10, 5),
+        )
+        try:
+            self.style.map(
+                "TButton",
+                background=[("active", BUTTON_ACTIVE), ("disabled", "#eef1f5")],
+            )
+        except Exception:
+            pass
+        self._style_conf(
+            "TEntry",
+            fieldbackground="#ffffff",
+            foreground=TEXT,
+            bordercolor=BORDER,
+            lightcolor=BORDER,
+            darkcolor=BORDER,
+        )
+        self._style_conf(
+            "TCombobox",
+            fieldbackground="#ffffff",
+            background="#ffffff",
+            foreground=TEXT,
+            bordercolor=BORDER,
+            arrowcolor=ACCENT,
+        )
+        self._style_conf("TCheckbutton", background=BG_MAIN, foreground=TEXT)
+        self._style_conf("TRadiobutton", background=BG_MAIN, foreground=TEXT)
+        self._style_conf(
+            "TProgressbar", background=ACCENT, troughcolor="#e9f0f8"
+        )
+        self._style_conf(
+            "TScrollbar", background="#c8d9ec", troughcolor="#eef4fa"
+        )
         try:
             self.root.option_add("*Font", "{Microsoft YaHei UI} 10")
         except Exception:
@@ -148,26 +216,34 @@ class App:
 
     # ---------------------------------------------------------------- layout
     def _build_layout(self) -> None:
-        self.status_label = ttk.Label(
-            self.root, textvariable=self.status_var, relief="sunken", anchor="w"
+        self.status_label = tk.Label(
+            self.root,
+            textvariable=self.status_var,
+            anchor="w",
+            bg=BG_SIDEBAR,
+            fg=TEXT,
+            padx=8,
+            pady=3,
         )
         self.status_label.pack(side="bottom", fill="x")
 
-        container = ttk.Frame(self.root)
+        container = tk.Frame(self.root, bg=BG_MAIN)
         container.pack(side="top", fill="both", expand=True)
 
-        self.sidebar = tk.Frame(container, bg="#f0f0f0", width=168)
+        self.sidebar = tk.Frame(container, bg=BG_SIDEBAR, width=168)
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
 
-        self.content = ttk.Frame(container)
+        separator = tk.Frame(container, bg=BORDER, width=1)
+        separator.pack(side="left", fill="y")
+
+        self.content = ttk.Frame(container, style="TFrame")
         self.content.pack(side="left", fill="both", expand=True)
 
         self.pages = {}
         self.nav_buttons = {}
         for key, label in (
             ("run", "运行"),
-            ("params", "参数设置"),
             ("output", "输出目录"),
             ("log", "日志预览"),
             ("about", "关于"),
@@ -179,15 +255,19 @@ class App:
                 relief="flat",
                 bd=0,
                 padx=18,
-                pady=10,
+                pady=11,
                 font=self.font,
+                cursor="hand2",
+                bg=BG_SIDEBAR,
+                fg=TEXT,
+                activebackground=BG_SIDEBAR_ACTIVE,
+                activeforeground=ACCENT,
                 command=lambda k=key: self._show(k),
             )
             btn.pack(fill="x")
             self.nav_buttons[key] = btn
 
         self.pages["run"] = self._build_run_page(self.content)
-        self.pages["params"] = self._build_params_page(self.content)
         self.pages["output"] = self._build_output_page(self.content)
         self.pages["log"] = self._build_log_page(self.content)
         self.pages["about"] = self._build_about_page(self.content)
@@ -199,77 +279,26 @@ class App:
     def _show(self, name: str) -> None:
         self.pages[name].tkraise()
         for key, btn in self.nav_buttons.items():
-            btn.config(bg="#dbe6f4" if key == name else "#f0f0f0")
+            if key == name:
+                btn.config(bg=BG_SIDEBAR_ACTIVE, fg=ACCENT)
+            else:
+                btn.config(bg=BG_SIDEBAR, fg=TEXT)
         if name == "output":
             self._refresh_output_history()
         if name == "run":
             self._refresh_run_summary()
 
     def _heading(self, parent, text: str) -> ttk.Label:
-        label = ttk.Label(parent, text=text, font=("Microsoft YaHei UI", 13, "bold"))
+        label = ttk.Label(parent, text=text, style="Heading.TLabel")
         label.pack(anchor="w")
         return label
 
     # ---------------------------------------------------------------- run page
     def _build_run_page(self, parent) -> ttk.Frame:
-        f = ttk.Frame(parent, padding=20)
-        self._heading(f, "运行")
-        self.run_summary = ttk.Label(f, text="", justify="left")
-        self.run_summary.pack(anchor="w", pady=(10, 4))
+        f = ttk.Frame(parent, padding=14)
+        self._heading(f, "运行与参数设置")
 
-        self.progress = ttk.Progressbar(f, mode="indeterminate")
-        self.progress.pack(fill="x", pady=(16, 4))
-
-        row = ttk.Frame(f)
-        row.pack(anchor="w", pady=6)
-        self.btn_run = ttk.Button(row, text="开始计算", command=self._start_run)
-        self.btn_run.pack(side="left")
-        self.btn_cancel = ttk.Button(
-            row, text="取消", command=self._cancel, state="disabled"
-        )
-        self.btn_cancel.pack(side="left", padx=8)
-        ttk.Button(row, text="打开输出目录", command=self._open_output_dir).pack(
-            side="left"
-        )
-
-        tip = (
-            "提示：开始计算会先保存当前参数到 config.json，再在后台下载谱线并计算；"
-            "进度与日志见“日志预览”页。"
-        )
-        ttk.Label(f, text=tip, foreground="#666666").pack(anchor="w", pady=(12, 0))
-        return f
-
-    def _refresh_run_summary(self) -> None:
-        try:
-            cfg = self._read_form_config()
-        except ConfigError as exc:
-            self.run_summary.config(text="参数有误：%s" % exc)
-            return
-        self.run_summary.config(
-            text=(
-                "波段 %.3f–%.3f μm（%.2f–%.2f cm⁻¹）\n"
-                "分辨率 %.3g cm⁻¹   光程 %.0f m   T=%.1f K   p=%.3g atm\n"
-                "输出目录：%s"
-                % (
-                    cfg.band.wavelength_min_um,
-                    cfg.band.wavelength_max_um,
-                    cfg.wavenumber_min,
-                    cfg.wavenumber_max,
-                    cfg.simulation.instrument_resolution,
-                    cfg.simulation.path_length_cm / 100.0,
-                    cfg.simulation.temperature_k,
-                    cfg.simulation.pressure_atm,
-                    self._resolve_output_path(),
-                )
-            )
-        )
-
-    # ---------------------------------------------------------------- params page
-    def _build_params_page(self, parent) -> ttk.Frame:
-        f = ttk.Frame(parent, padding=16)
-        self._heading(f, "参数设置")
-
-        sim = ttk.Labelframe(f, text="仿真参数", padding=10)
+        sim = ttk.Labelframe(f, text="仿真参数", padding=8)
         sim.pack(fill="x", pady=(8, 6))
         fields = [
             ("wavelength_min_um", "波长下限 (μm)", "8.9"),
@@ -285,33 +314,32 @@ class App:
         for i, (key, label, default) in enumerate(fields):
             r, c = divmod(i, 2)
             self._add_field(sim, r, c, key, label, default)
-
-        slit_row = ttk.Frame(f)
-        slit_row.pack(fill="x", pady=4)
         self.vars["slit_function"] = tk.StringVar(value="gaussian")
-        ttk.Label(slit_row, text="狭缝函数").pack(side="left")
+        ttk.Label(sim, text="狭缝函数").grid(
+            row=5, column=0, sticky="w", padx=(0, 6), pady=4
+        )
         ttk.Combobox(
-            slit_row,
+            sim,
             textvariable=self.vars["slit_function"],
             values=list(SLIT_FUNCTIONS.keys()),
             state="readonly",
             width=14,
-        ).pack(side="left", padx=8)
+        ).grid(row=5, column=1, sticky="w", pady=4)
 
         mid = ttk.Frame(f)
-        mid.pack(fill="both", expand=True, pady=6)
+        mid.pack(fill="both", expand=True, pady=4)
         left = ttk.Labelframe(mid, text="成分体积混合比（name=value）")
         left.pack(side="left", fill="both", expand=True, padx=(0, 5))
-        self.components_text = tk.Text(left, height=6, width=38, font=self.font)
+        self.components_text = self._make_text(left)
         self.components_text.pack(fill="both", expand=True)
 
         right = ttk.Labelframe(mid, text="分子清单（name,M,I）")
         right.pack(side="left", fill="both", expand=True, padx=(5, 0))
-        self.molecules_text = tk.Text(right, height=6, width=38, font=self.font)
+        self.molecules_text = self._make_text(right)
         self.molecules_text.pack(fill="both", expand=True)
 
-        net = ttk.Labelframe(f, text="网络与 API Key", padding=10)
-        net.pack(fill="x", pady=6)
+        net = ttk.Labelframe(f, text="网络与 API Key", padding=8)
+        net.pack(fill="x", pady=4)
         self.vars["use_proxy"] = tk.BooleanVar(value=False)
         ttk.Checkbutton(net, text="启用代理", variable=self.vars["use_proxy"]).grid(
             row=0, column=0, sticky="w"
@@ -328,13 +356,45 @@ class App:
         )
         net.columnconfigure(2, weight=1)
 
-        btns = ttk.Frame(f)
-        btns.pack(anchor="w", pady=8)
-        ttk.Button(btns, text="保存配置", command=self._save_config).pack(side="left")
-        ttk.Button(btns, text="应用到运行", command=self._refresh_run_summary).pack(
+        runbar = ttk.Labelframe(f, text="运行", padding=8)
+        runbar.pack(fill="x", pady=(6, 0))
+        self.run_summary = ttk.Label(
+            runbar, text="", foreground=SUBTLE, justify="left"
+        )
+        self.run_summary.pack(anchor="w", fill="x")
+        self.progress = ttk.Progressbar(runbar, mode="indeterminate")
+        self.progress.pack(fill="x", pady=(6, 4))
+        row = ttk.Frame(runbar)
+        row.pack(anchor="w")
+        self.btn_run = ttk.Button(row, text="开始计算", command=self._start_run)
+        self.btn_run.pack(side="left")
+        self.btn_cancel = ttk.Button(
+            row, text="取消", command=self._cancel, state="disabled"
+        )
+        self.btn_cancel.pack(side="left", padx=8)
+        ttk.Button(row, text="保存配置", command=self._save_config).pack(
             side="left", padx=8
         )
+        ttk.Button(row, text="打开输出目录", command=self._open_output_dir).pack(
+            side="left"
+        )
         return f
+
+    def _make_text(self, parent) -> tk.Text:
+        return tk.Text(
+            parent,
+            height=5,
+            width=38,
+            font=self.font,
+            bg="white",
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="solid",
+            borderwidth=1,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=ACCENT,
+        )
 
     def _add_field(self, parent, row, col, key, label, default) -> None:
         self.vars[key] = tk.StringVar(value=default)
@@ -345,6 +405,30 @@ class App:
             row=row, column=col * 2 + 1, sticky="we", pady=4
         )
         parent.columnconfigure(col * 2 + 1, weight=1)
+
+    def _refresh_run_summary(self) -> None:
+        try:
+            cfg = self._read_form_config()
+        except ConfigError as exc:
+            self.run_summary.config(text="参数有误：%s" % exc)
+            return
+        self.run_summary.config(
+            text=(
+                "波段 %.3f–%.3f μm（%.2f–%.2f cm⁻¹）  ·  分辨率 %.3g cm⁻¹  ·  "
+                "光程 %.0f m  ·  T=%.1f K  ·  p=%.3g atm  ·  输出：%s"
+                % (
+                    cfg.band.wavelength_min_um,
+                    cfg.band.wavelength_max_um,
+                    cfg.wavenumber_min,
+                    cfg.wavenumber_max,
+                    cfg.simulation.instrument_resolution,
+                    cfg.simulation.path_length_cm / 100.0,
+                    cfg.simulation.temperature_k,
+                    cfg.simulation.pressure_atm,
+                    self._resolve_output_path(),
+                )
+            )
+        )
 
     # ---------------------------------------------------------------- output page
     def _build_output_page(self, parent) -> ttk.Frame:
@@ -379,7 +463,19 @@ class App:
         )
 
         ttk.Label(f, text="最近运行结果（双击打开）").pack(anchor="w", pady=(14, 2))
-        self.history = tk.Listbox(f, font=self.font, height=8)
+        self.history = tk.Listbox(
+            f,
+            font=self.font,
+            height=8,
+            bg="white",
+            fg=TEXT,
+            selectbackground=ACCENT,
+            selectforeground="white",
+            relief="solid",
+            borderwidth=1,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+        )
         self.history.pack(fill="both", expand=True)
         self.history.bind("<Double-Button-1>", lambda e: self._open_selected_history())
         return f
@@ -464,7 +560,16 @@ class App:
         )
 
         self.log_text = scrolledtext.ScrolledText(
-            f, state="disabled", font=self.font, wrap="word"
+            f,
+            state="disabled",
+            font=self.font,
+            wrap="word",
+            bg="white",
+            fg=TEXT,
+            relief="solid",
+            borderwidth=1,
+            highlightthickness=1,
+            highlightbackground=BORDER,
         )
         self.log_text.pack(fill="both", expand=True, pady=(8, 0))
         self.log_text.tag_configure("info", foreground="#000000")
@@ -687,7 +792,6 @@ class App:
             "开始计算：%.3f–%.3f μm"
             % (cfg.band.wavelength_min_um, cfg.band.wavelength_max_um)
         )
-        self._show("run")
         threading.Thread(target=self._worker, args=(cfg,), daemon=True).start()
 
     def _worker(self, cfg: Config) -> None:
