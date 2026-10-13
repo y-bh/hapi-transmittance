@@ -8,6 +8,8 @@ logs/
 dist/
 build/
 *.spec.bak
+*.zip
+*.exe
 config.json
 .idea/
 .vscode/
