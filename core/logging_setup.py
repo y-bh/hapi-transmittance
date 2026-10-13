@@ -27,10 +27,11 @@ def _force_utf8(stream) -> None:
 class _StreamTee:
     """把写入 stdout/stderr 的文本转发到日志。不直接写回控制台，避免重复输出。"""
 
-    def __init__(self, logger: logging.Logger, level: int, fallback):
+    def __init__(self, logger: logging.Logger, level: int, fallback, extra=None):
         self.logger = logger
         self.level = level
         self.fallback = fallback
+        self.extra = extra
         self._buf = ""
 
     def write(self, text: str) -> None:
@@ -64,6 +65,11 @@ class _StreamTee:
             self.logger.log(self.level, message)
         except Exception:
             pass
+        if self.extra is not None:
+            try:
+                self.extra(self.level, message)
+            except Exception:
+                pass
 
     def isatty(self) -> bool:
         return False
@@ -110,10 +116,11 @@ def setup_logging(log_dir: Optional[Path] = None, level: int = logging.INFO) -> 
     return logger
 
 
-def capture_print_output(logger: logging.Logger) -> None:
+def capture_print_output(logger: logging.Logger, extra=None) -> None:
     """把后续所有 print/标准输出转发到日志，适用于 GUI 与 HAPI 的 banner 输出。
 
     不把内容直接写回控制台：控制台 handler 会负责输出，避免一行出现两次。
+    extra 可选，为 callable(level, message)，用于把输出同时推送到 GUI 等额外消费方。
     """
-    sys.stdout = _StreamTee(logger, logging.INFO, None)
-    sys.stderr = _StreamTee(logger, logging.WARNING, None)
+    sys.stdout = _StreamTee(logger, logging.INFO, None, extra)
+    sys.stderr = _StreamTee(logger, logging.WARNING, None, extra)

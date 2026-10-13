@@ -1,16 +1,20 @@
-"""Tkinter 图形界面入口。
+# -*- coding: utf-8 -*-
+"""Tkinter 图形界面：左侧侧边栏导航 + 右侧功能页。
 
-界面负责编辑配置、启动后台计算、显示进度与日志。真正的计算在后台线程执行，
-通过队列把日志消息传回主线程，避免界面卡死。
+包含清晰度修复（DPI 感知 + 统一字体）、输出目录管理页、日志预览页。
+计算在后台线程执行，通过队列把进度与日志传回主线程。
 """
 
 from __future__ import annotations
 
+import ctypes
+import logging
 import os
 import queue
+import sys
 import threading
-import tkinter as tk
 import traceback
+import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
@@ -28,9 +32,9 @@ from core.config import (
     get_base_dir,
     get_config_path,
     get_data_dir,
-    get_output_dir,
     load_config,
     save_config,
+    validate,
 )
 from core.fetcher import CancelledError
 from core.logging_setup import capture_print_output, setup_logging
@@ -41,14 +45,29 @@ DATA_DIR = get_data_dir(BASE_DIR)
 CONFIG_PATH = get_config_path(BASE_DIR)
 LOG_DIR = DATA_DIR / "logs"
 
-# 先建好日志并接管 print，再导入 pipeline（其内部会 import hapi 并打印 banner）
+# 先建日志并接管 print，再导入 pipeline（其内部会 import hapi 并打印 banner）
 logger = setup_logging(LOG_DIR)
 capture_print_output(logger)
+
+from core.pipeline import run_pipeline  # noqa: E402
 
 if DATA_DIR != BASE_DIR:
     logger.warning("程序目录不可写，配置/缓存/输出/日志将保存到 %s", DATA_DIR)
 
-from core.pipeline import run_pipeline  # noqa: E402
+
+APP_VERSION = "1.1.0"
+MAX_LOG_LINES = 5000
+
+
+def enable_dpi_awareness() -> None:
+    """在创建任何窗口前开启高 DPI 感知，避免界面被 Windows 拉伸而模糊。"""
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
 
 def _parse_components(text: str) -> dict:
@@ -80,25 +99,178 @@ def _parse_molecules(text: str) -> list:
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        root.title("HAPI 大气透过率仿真")
-        root.geometry("900x760")
-        root.minsize(820, 680)
-
         self.q = queue.Queue()
         self.cancel_event = threading.Event()
         self.running = False
         self.last_run_dir: Path | None = None
 
-        self._vars = {}
-        self._build_widgets()
-        self._load()
+        self.log_lines = []  # [(level, text), ...]
+        self.log_filter_var = tk.StringVar(value="ALL")
+        self.auto_scroll_var = tk.BooleanVar(value=True)
+        self.output_dir_var = tk.StringVar(value="output")
+        self.timestamped_var = tk.BooleanVar(value=True)
+        self.status_var = tk.StringVar(value="就绪")
+        self.vars = {}
+        self._history_dirs = []
+
+        root.title("HAPI 大气透过率仿真")
+        root.geometry("1020x720")
+        root.minsize(900, 640)
+
+        self._setup_style()
+        self._build_layout()
+        self._load_config()
+        capture_print_output(logger, extra=self._on_print)
         root.after(120, self._poll)
 
-    # ---------------------------------------------------------- UI
-    def _build_widgets(self) -> None:
-        top = ttk.Frame(self.root, padding=10)
-        top.pack(fill="x")
+    # ---------------------------------------------------------------- style
+    def _setup_style(self) -> None:
+        self.font = ("Microsoft YaHei UI", 10)
+        self.style = ttk.Style(self.root)
+        try:
+            self.style.theme_use("vista")
+        except Exception:
+            pass
+        for widget in (
+            "TLabel",
+            "TButton",
+            "TEntry",
+            "TCombobox",
+            "TCheckbutton",
+            "TRadiobutton",
+            "TLabelframe.Label",
+        ):
+            self.style.configure(widget, font=self.font)
+        try:
+            self.root.option_add("*Font", "{Microsoft YaHei UI} 10")
+        except Exception:
+            pass
 
+    # ---------------------------------------------------------------- layout
+    def _build_layout(self) -> None:
+        self.status_label = ttk.Label(
+            self.root, textvariable=self.status_var, relief="sunken", anchor="w"
+        )
+        self.status_label.pack(side="bottom", fill="x")
+
+        container = ttk.Frame(self.root)
+        container.pack(side="top", fill="both", expand=True)
+
+        self.sidebar = tk.Frame(container, bg="#f0f0f0", width=168)
+        self.sidebar.pack(side="left", fill="y")
+        self.sidebar.pack_propagate(False)
+
+        self.content = ttk.Frame(container)
+        self.content.pack(side="left", fill="both", expand=True)
+
+        self.pages = {}
+        self.nav_buttons = {}
+        for key, label in (
+            ("run", "运行"),
+            ("params", "参数设置"),
+            ("output", "输出目录"),
+            ("log", "日志预览"),
+            ("about", "关于"),
+        ):
+            btn = tk.Button(
+                self.sidebar,
+                text=label,
+                anchor="w",
+                relief="flat",
+                bd=0,
+                padx=18,
+                pady=10,
+                font=self.font,
+                command=lambda k=key: self._show(k),
+            )
+            btn.pack(fill="x")
+            self.nav_buttons[key] = btn
+
+        self.pages["run"] = self._build_run_page(self.content)
+        self.pages["params"] = self._build_params_page(self.content)
+        self.pages["output"] = self._build_output_page(self.content)
+        self.pages["log"] = self._build_log_page(self.content)
+        self.pages["about"] = self._build_about_page(self.content)
+
+        for page in self.pages.values():
+            page.place(x=0, y=0, relwidth=1, relheight=1)
+        self._show("run")
+
+    def _show(self, name: str) -> None:
+        self.pages[name].tkraise()
+        for key, btn in self.nav_buttons.items():
+            btn.config(bg="#dbe6f4" if key == name else "#f0f0f0")
+        if name == "output":
+            self._refresh_output_history()
+        if name == "run":
+            self._refresh_run_summary()
+
+    def _heading(self, parent, text: str) -> ttk.Label:
+        label = ttk.Label(parent, text=text, font=("Microsoft YaHei UI", 13, "bold"))
+        label.pack(anchor="w")
+        return label
+
+    # ---------------------------------------------------------------- run page
+    def _build_run_page(self, parent) -> ttk.Frame:
+        f = ttk.Frame(parent, padding=20)
+        self._heading(f, "运行")
+        self.run_summary = ttk.Label(f, text="", justify="left")
+        self.run_summary.pack(anchor="w", pady=(10, 4))
+
+        self.progress = ttk.Progressbar(f, mode="indeterminate")
+        self.progress.pack(fill="x", pady=(16, 4))
+
+        row = ttk.Frame(f)
+        row.pack(anchor="w", pady=6)
+        self.btn_run = ttk.Button(row, text="开始计算", command=self._start_run)
+        self.btn_run.pack(side="left")
+        self.btn_cancel = ttk.Button(
+            row, text="取消", command=self._cancel, state="disabled"
+        )
+        self.btn_cancel.pack(side="left", padx=8)
+        ttk.Button(row, text="打开输出目录", command=self._open_output_dir).pack(
+            side="left"
+        )
+
+        tip = (
+            "提示：开始计算会先保存当前参数到 config.json，再在后台下载谱线并计算；"
+            "进度与日志见“日志预览”页。"
+        )
+        ttk.Label(f, text=tip, foreground="#666666").pack(anchor="w", pady=(12, 0))
+        return f
+
+    def _refresh_run_summary(self) -> None:
+        try:
+            cfg = self._read_form_config()
+        except ConfigError as exc:
+            self.run_summary.config(text="参数有误：%s" % exc)
+            return
+        self.run_summary.config(
+            text=(
+                "波段 %.3f–%.3f μm（%.2f–%.2f cm⁻¹）\n"
+                "分辨率 %.3g cm⁻¹   光程 %.0f m   T=%.1f K   p=%.3g atm\n"
+                "输出目录：%s"
+                % (
+                    cfg.band.wavelength_min_um,
+                    cfg.band.wavelength_max_um,
+                    cfg.wavenumber_min,
+                    cfg.wavenumber_max,
+                    cfg.simulation.instrument_resolution,
+                    cfg.simulation.path_length_cm / 100.0,
+                    cfg.simulation.temperature_k,
+                    cfg.simulation.pressure_atm,
+                    self._resolve_output_path(),
+                )
+            )
+        )
+
+    # ---------------------------------------------------------------- params page
+    def _build_params_page(self, parent) -> ttk.Frame:
+        f = ttk.Frame(parent, padding=16)
+        self._heading(f, "参数设置")
+
+        sim = ttk.Labelframe(f, text="仿真参数", padding=10)
+        sim.pack(fill="x", pady=(8, 6))
         fields = [
             ("wavelength_min_um", "波长下限 (μm)", "8.9"),
             ("wavelength_max_um", "波长上限 (μm)", "11.0"),
@@ -108,115 +280,328 @@ class App:
             ("temperature_k", "温度 (K)", "296"),
             ("pressure_atm", "压强 (atm)", "1.0"),
             ("wavenumber_wing", "谱线翼截断 (cm⁻¹)", "25"),
-            ("tau_line_min", "最小光学厚度 τ_line", "0.0001"),
-            ("proxy", "代理地址", "http://127.0.0.1:7890"),
-            ("api_key", "HITRAN API Key", ""),
+            ("tau_line_min", "最小光学厚度 τ", "0.0001"),
         ]
         for i, (key, label, default) in enumerate(fields):
             r, c = divmod(i, 2)
-            self._add_field(top, r, c, key, label, default)
+            self._add_field(sim, r, c, key, label, default)
 
-        # 狭缝函数 / 开关
-        row = (len(fields) + 1) // 2
-        self._vars["slit_function"] = tk.StringVar(value="gaussian")
-        ttk.Label(top, text="狭缝函数").grid(row=row, column=0, sticky="w", pady=4)
-        slit_box = ttk.Combobox(
-            top,
-            textvariable=self._vars["slit_function"],
+        slit_row = ttk.Frame(f)
+        slit_row.pack(fill="x", pady=4)
+        self.vars["slit_function"] = tk.StringVar(value="gaussian")
+        ttk.Label(slit_row, text="狭缝函数").pack(side="left")
+        ttk.Combobox(
+            slit_row,
+            textvariable=self.vars["slit_function"],
             values=list(SLIT_FUNCTIONS.keys()),
             state="readonly",
-            width=18,
-        )
-        slit_box.grid(row=row, column=1, sticky="we", pady=4)
+            width=14,
+        ).pack(side="left", padx=8)
 
-        self._vars["use_proxy"] = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            top, text="启用代理", variable=self._vars["use_proxy"]
-        ).grid(row=row, column=2, sticky="w", pady=4)
-        self._vars["timestamped_subdir"] = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            top, text="结果按时间戳分目录", variable=self._vars["timestamped_subdir"]
-        ).grid(row=row, column=3, sticky="w", pady=4)
-
-        # 成分与分子
-        mid = ttk.Frame(self.root, padding=10)
-        mid.pack(fill="x")
-        left = ttk.LabelFrame(mid, text="成分体积混合比（name=value，每行一个）")
+        mid = ttk.Frame(f)
+        mid.pack(fill="both", expand=True, pady=6)
+        left = ttk.Labelframe(mid, text="成分体积混合比（name=value）")
         left.pack(side="left", fill="both", expand=True, padx=(0, 5))
-        self.components_text = tk.Text(left, height=6, width=38)
+        self.components_text = tk.Text(left, height=6, width=38, font=self.font)
         self.components_text.pack(fill="both", expand=True)
 
-        right = ttk.LabelFrame(mid, text="分子清单（name,M,I，每行一个，高级）")
+        right = ttk.Labelframe(mid, text="分子清单（name,M,I）")
         right.pack(side="left", fill="both", expand=True, padx=(5, 0))
-        self.molecules_text = tk.Text(right, height=6, width=38)
+        self.molecules_text = tk.Text(right, height=6, width=38, font=self.font)
         self.molecules_text.pack(fill="both", expand=True)
 
-        # 输出目录
-        out_row = ttk.Frame(self.root, padding=(10, 0))
-        out_row.pack(fill="x")
-        self._vars["output_dir"] = tk.StringVar(value="output")
-        ttk.Label(out_row, text="输出目录").pack(side="left")
-        ttk.Entry(out_row, textvariable=self._vars["output_dir"]).pack(
-            side="left", fill="x", expand=True, padx=6
+        net = ttk.Labelframe(f, text="网络与 API Key", padding=10)
+        net.pack(fill="x", pady=6)
+        self.vars["use_proxy"] = tk.BooleanVar(value=False)
+        ttk.Checkbutton(net, text="启用代理", variable=self.vars["use_proxy"]).grid(
+            row=0, column=0, sticky="w"
         )
-        ttk.Button(out_row, text="浏览...", command=self._browse_output).pack(side="left")
-
-        # 控制按钮
-        btn_row = ttk.Frame(self.root, padding=(10, 6))
-        btn_row.pack(fill="x")
-        self.btn_run = ttk.Button(btn_row, text="开始计算", command=self._run)
-        self.btn_run.pack(side="left")
-        self.btn_cancel = ttk.Button(
-            btn_row, text="取消", command=self._cancel, state="disabled"
+        self.vars["proxy"] = tk.StringVar(value="http://127.0.0.1:7890")
+        ttk.Label(net, text="代理地址").grid(row=0, column=1, sticky="e", padx=(14, 4))
+        ttk.Entry(net, textvariable=self.vars["proxy"], width=30).grid(
+            row=0, column=2, sticky="we"
         )
-        self.btn_cancel.pack(side="left", padx=6)
-        ttk.Button(btn_row, text="保存配置", command=self._save).pack(side="left")
-        self.btn_open = ttk.Button(
-            btn_row, text="打开输出目录", command=self._open_output, state="disabled"
+        self.vars["api_key"] = tk.StringVar(value="")
+        ttk.Label(net, text="API Key").grid(row=1, column=1, sticky="e", padx=(14, 4))
+        ttk.Entry(net, textvariable=self.vars["api_key"], width=30).grid(
+            row=1, column=2, sticky="we", pady=4
         )
-        self.btn_open.pack(side="left", padx=6)
+        net.columnconfigure(2, weight=1)
 
-        self.progress = ttk.Progressbar(self.root, mode="indeterminate")
-        self.progress.pack(fill="x", padx=10, pady=(0, 4))
-
-        self.log_text = scrolledtext.ScrolledText(self.root, height=18, state="disabled")
-        self.log_text.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        btns = ttk.Frame(f)
+        btns.pack(anchor="w", pady=8)
+        ttk.Button(btns, text="保存配置", command=self._save_config).pack(side="left")
+        ttk.Button(btns, text="应用到运行", command=self._refresh_run_summary).pack(
+            side="left", padx=8
+        )
+        return f
 
     def _add_field(self, parent, row, col, key, label, default) -> None:
-        self._vars[key] = tk.StringVar(value=default)
+        self.vars[key] = tk.StringVar(value=default)
         ttk.Label(parent, text=label).grid(
-            row=row, column=col * 2, sticky="w", pady=4
+            row=row, column=col * 2, sticky="w", padx=(0, 6), pady=4
         )
-        ttk.Entry(parent, textvariable=self._vars[key], width=22).grid(
-            row=row, column=col * 2 + 1, sticky="we", pady=4, padx=(0, 12)
+        ttk.Entry(parent, textvariable=self.vars[key], width=20).grid(
+            row=row, column=col * 2 + 1, sticky="we", pady=4
         )
         parent.columnconfigure(col * 2 + 1, weight=1)
 
-    # ---------------------------------------------------------- 配置
-    def _load(self) -> None:
+    # ---------------------------------------------------------------- output page
+    def _build_output_page(self, parent) -> ttk.Frame:
+        f = ttk.Frame(parent, padding=16)
+        self._heading(f, "输出目录")
+
+        row = ttk.Frame(f)
+        row.pack(fill="x", pady=(10, 4))
+        ttk.Label(row, text="输出目录").pack(side="left")
+        ttk.Entry(row, textvariable=self.output_dir_var).pack(
+            side="left", fill="x", expand=True, padx=6
+        )
+        ttk.Button(row, text="浏览…", command=self._browse_output).pack(side="left")
+
+        ttk.Checkbutton(
+            f, text="结果按时间戳分目录", variable=self.timestamped_var
+        ).pack(anchor="w", pady=4)
+
+        btns = ttk.Frame(f)
+        btns.pack(anchor="w", pady=4)
+        ttk.Button(btns, text="检查可写", command=self._check_output_writable).pack(
+            side="left"
+        )
+        ttk.Button(btns, text="保存配置", command=self._save_config).pack(
+            side="left", padx=8
+        )
+        ttk.Button(btns, text="打开输出目录", command=self._open_output_dir).pack(
+            side="left", padx=8
+        )
+        ttk.Button(btns, text="刷新", command=self._refresh_output_history).pack(
+            side="left"
+        )
+
+        ttk.Label(f, text="最近运行结果（双击打开）").pack(anchor="w", pady=(14, 2))
+        self.history = tk.Listbox(f, font=self.font, height=8)
+        self.history.pack(fill="both", expand=True)
+        self.history.bind("<Double-Button-1>", lambda e: self._open_selected_history())
+        return f
+
+    def _resolve_output_path(self) -> Path:
+        value = self.output_dir_var.get().strip() or "output"
+        p = Path(value)
+        if not p.is_absolute():
+            p = DATA_DIR / p
+        return p
+
+    def _browse_output(self) -> None:
+        initial = self._resolve_output_path()
+        if not initial.exists():
+            initial = DATA_DIR
+        chosen = filedialog.askdirectory(initialdir=str(initial))
+        if chosen:
+            self.output_dir_var.set(chosen)
+            self._refresh_output_history()
+
+    def _check_output_writable(self) -> None:
+        p = self._resolve_output_path()
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            probe = p / ".write_test.tmp"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+            messagebox.showinfo("可写", "目录可写：\n%s" % p)
+        except Exception as exc:
+            messagebox.showerror("不可写", "目录不可写：\n%s\n\n%s" % (p, exc))
+
+    def _refresh_output_history(self) -> None:
+        p = self._resolve_output_path()
+        self.history.delete(0, "end")
+        self._history_dirs = []
+        if not p.exists():
+            return
+        dirs = [d for d in p.iterdir() if d.is_dir()]
+        dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+        for d in dirs[:30]:
+            self.history.insert("end", d.name)
+            self._history_dirs.append(d)
+
+    def _open_selected_history(self) -> None:
+        selection = self.history.curselection()
+        if selection and selection[0] < len(self._history_dirs):
+            os.startfile(str(self._history_dirs[selection[0]]))
+
+    def _open_output_dir(self) -> None:
+        target = self.last_run_dir or self._resolve_output_path()
+        if target.exists():
+            os.startfile(str(target))
+        else:
+            messagebox.showinfo("提示", "输出目录尚不存在：\n%s" % target)
+
+    # ---------------------------------------------------------------- log page
+    def _build_log_page(self, parent) -> ttk.Frame:
+        f = ttk.Frame(parent, padding=16)
+        self._heading(f, "日志预览")
+
+        head = ttk.Frame(f)
+        head.pack(fill="x")
+        for text, value in (
+            ("全部", "ALL"),
+            ("INFO", "INFO"),
+            ("WARNING", "WARNING"),
+            ("ERROR", "ERROR"),
+        ):
+            ttk.Radiobutton(
+                head,
+                text=text,
+                value=value,
+                variable=self.log_filter_var,
+                command=self._render_log,
+            ).pack(side="left", padx=(0, 4))
+        ttk.Checkbutton(head, text="自动滚动", variable=self.auto_scroll_var).pack(
+            side="left", padx=8
+        )
+        ttk.Button(head, text="清空显示", command=self._clear_log).pack(side="right")
+        ttk.Button(head, text="打开日志文件", command=self._open_log_file).pack(
+            side="right", padx=6
+        )
+
+        self.log_text = scrolledtext.ScrolledText(
+            f, state="disabled", font=self.font, wrap="word"
+        )
+        self.log_text.pack(fill="both", expand=True, pady=(8, 0))
+        self.log_text.tag_configure("info", foreground="#000000")
+        self.log_text.tag_configure("warning", foreground="#c77700")
+        self.log_text.tag_configure("error", foreground="#d32f2f")
+        self.log_text.tag_configure("critical", foreground="#b00020")
+        return f
+
+    def _level_tag(self, level: int) -> str:
+        if level >= logging.CRITICAL:
+            return "critical"
+        if level >= logging.ERROR:
+            return "error"
+        if level >= logging.WARNING:
+            return "warning"
+        return "info"
+
+    def _level_matches(self, level: int) -> bool:
+        current = self.log_filter_var.get()
+        if current == "ALL":
+            return True
+        threshold = {"INFO": logging.INFO, "WARNING": logging.WARNING, "ERROR": logging.ERROR}[
+            current
+        ]
+        return level >= threshold
+
+    def _append_log(self, level: int, message: str) -> None:
+        self.log_lines.append((level, message))
+        if len(self.log_lines) > MAX_LOG_LINES:
+            self.log_lines = self.log_lines[-MAX_LOG_LINES:]
+            self._render_log()
+            return
+        if self._level_matches(level):
+            self._insert_line(level, message)
+
+    def _insert_line(self, level: int, message: str) -> None:
+        self.log_text.config(state="normal")
+        self.log_text.insert("end", message + "\n", self._level_tag(level))
+        if self.auto_scroll_var.get():
+            self.log_text.see("end")
+        self.log_text.config(state="disabled")
+
+    def _render_log(self) -> None:
+        self.log_text.config(state="normal")
+        self.log_text.delete("1.0", "end")
+        for level, message in self.log_lines[-MAX_LOG_LINES:]:
+            if self._level_matches(level):
+                self.log_text.insert("end", message + "\n", self._level_tag(level))
+        if self.auto_scroll_var.get():
+            self.log_text.see("end")
+        self.log_text.config(state="disabled")
+
+    def _clear_log(self) -> None:
+        self.log_lines = []
+        self.log_text.config(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.config(state="disabled")
+
+    def _open_log_file(self) -> None:
+        logs = sorted(LOG_DIR.glob("run_*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if logs:
+            os.startfile(str(logs[0]))
+        else:
+            messagebox.showinfo("提示", "还没有日志文件。")
+
+    # ---------------------------------------------------------------- about page
+    def _build_about_page(self, parent) -> ttk.Frame:
+        f = ttk.Frame(parent, padding=20)
+        ttk.Label(
+            f, text="HAPI 大气透过率仿真", font=("Microsoft YaHei UI", 15, "bold")
+        ).pack(anchor="w")
+        ttk.Label(f, text="版本 %s" % APP_VERSION).pack(anchor="w", pady=(4, 0))
+        ttk.Label(
+            f,
+            text="基于 HITRAN 数据库与 HAPI 库，计算指定波段的大气透过率曲线。",
+            wraplength=620,
+            justify="left",
+        ).pack(anchor="w", pady=(8, 0))
+        ttk.Label(
+            f,
+            text=(
+                "引用：R.V. Kochanov, I.E. Gordon, L.S. Rothman, P. Wcislo, "
+                "C. Hill, J.S. Wilzewski, HITRAN Application Programming Interface "
+                "(HAPI): A comprehensive approach to working with spectroscopic data, "
+                "J. Quant. Spectrosc. Radiat. Transfer 177, 15-30 (2016). "
+                "DOI: 10.1016/j.jqsrt.2016.03.005"
+            ),
+            wraplength=620,
+            justify="left",
+        ).pack(anchor="w", pady=(8, 0))
+
+        row = ttk.Frame(f)
+        row.pack(anchor="w", pady=(14, 0))
+        ttk.Button(row, text="打开程序目录", command=lambda: os.startfile(str(BASE_DIR))).pack(
+            side="left"
+        )
+        ttk.Button(row, text="打开配置文件", command=self._open_config_file).pack(
+            side="left", padx=8
+        )
+        return f
+
+    def _open_config_file(self) -> None:
+        if CONFIG_PATH.exists():
+            os.startfile(str(CONFIG_PATH))
+        else:
+            messagebox.showinfo("提示", "配置文件不存在：\n%s" % CONFIG_PATH)
+
+    # ---------------------------------------------------------------- config
+    def _load_config(self) -> None:
         ensure_config_exists(CONFIG_PATH)
         try:
             cfg = load_config(CONFIG_PATH)
         except ConfigError as exc:
             messagebox.showerror("配置错误", str(exc))
             return
+        self._populate_form(cfg)
+        self._refresh_run_summary()
+        self._refresh_output_history()
+        self._log("已加载配置：%s" % CONFIG_PATH)
 
-        self._vars["wavelength_min_um"].set(str(cfg.band.wavelength_min_um))
-        self._vars["wavelength_max_um"].set(str(cfg.band.wavelength_max_um))
+    def _populate_form(self, cfg: Config) -> None:
+        self.vars["wavelength_min_um"].set(str(cfg.band.wavelength_min_um))
+        self.vars["wavelength_max_um"].set(str(cfg.band.wavelength_max_um))
         s = cfg.simulation
-        self._vars["wavenumber_step"].set(str(s.wavenumber_step))
-        self._vars["instrument_resolution"].set(str(s.instrument_resolution))
-        self._vars["path_length_cm"].set(str(s.path_length_cm))
-        self._vars["temperature_k"].set(str(s.temperature_k))
-        self._vars["pressure_atm"].set(str(s.pressure_atm))
-        self._vars["wavenumber_wing"].set(str(s.wavenumber_wing))
-        self._vars["tau_line_min"].set(str(s.tau_line_min))
-        self._vars["slit_function"].set(s.slit_function)
-        self._vars["proxy"].set(cfg.network.proxy)
-        self._vars["api_key"].set(cfg.network.api_key)
-        self._vars["use_proxy"].set(cfg.network.use_proxy)
-        self._vars["timestamped_subdir"].set(cfg.output.timestamped_subdir)
-        self._vars["output_dir"].set(cfg.paths.output_dir)
+        self.vars["wavenumber_step"].set(str(s.wavenumber_step))
+        self.vars["instrument_resolution"].set(str(s.instrument_resolution))
+        self.vars["path_length_cm"].set(str(s.path_length_cm))
+        self.vars["temperature_k"].set(str(s.temperature_k))
+        self.vars["pressure_atm"].set(str(s.pressure_atm))
+        self.vars["wavenumber_wing"].set(str(s.wavenumber_wing))
+        self.vars["tau_line_min"].set(str(s.tau_line_min))
+        self.vars["slit_function"].set(s.slit_function)
+        self.vars["use_proxy"].set(cfg.network.use_proxy)
+        self.vars["proxy"].set(cfg.network.proxy)
+        self.vars["api_key"].set(cfg.network.api_key)
+        self.output_dir_var.set(cfg.paths.output_dir)
+        self.timestamped_var.set(cfg.output.timestamped_subdir)
 
         self.components_text.delete("1.0", "end")
         self.components_text.insert(
@@ -226,17 +611,14 @@ class App:
         self.molecules_text.insert(
             "1.0", "\n".join("%s,%d,%d" % (m.name, m.M, m.I) for m in cfg.molecules)
         )
-        self._log("已加载配置: %s" % CONFIG_PATH)
 
-    def _form_to_config(self) -> Config:
+    def _read_form_config(self) -> Config:
         def num(key):
             try:
-                return float(self._vars[key].get())
-            except ValueError:
+                return float(self.vars[key].get())
+            except (ValueError, KeyError):
                 raise ConfigError("字段 %s 不是数字" % key)
 
-        components = _parse_components(self.components_text.get("1.0", "end"))
-        molecules = _parse_molecules(self.molecules_text.get("1.0", "end"))
         cfg = Config(
             band=BandConfig(
                 wavelength_min_um=num("wavelength_min_um"),
@@ -250,49 +632,44 @@ class App:
                 pressure_atm=num("pressure_atm"),
                 wavenumber_wing=num("wavenumber_wing"),
                 tau_line_min=num("tau_line_min"),
-                slit_function=self._vars["slit_function"].get(),
+                slit_function=self.vars["slit_function"].get(),
             ),
-            molecules=molecules,
-            components=components,
+            molecules=_parse_molecules(self.molecules_text.get("1.0", "end")),
+            components=_parse_components(self.components_text.get("1.0", "end")),
             diluent={"air": 1.0},
             network=NetworkConfig(
-                use_proxy=self._vars["use_proxy"].get(),
-                proxy=self._vars["proxy"].get(),
-                api_key=self._vars["api_key"].get(),
+                use_proxy=self.vars["use_proxy"].get(),
+                proxy=self.vars["proxy"].get(),
+                api_key=self.vars["api_key"].get(),
             ),
             paths=PathsConfig(
                 cache_dir="hitran_data_cache",
-                output_dir=self._vars["output_dir"].get(),
+                output_dir=self.output_dir_var.get(),
             ),
-            output=OutputConfig(timestamped_subdir=self._vars["timestamped_subdir"].get()),
+            output=OutputConfig(
+                timestamped_subdir=self.timestamped_var.get(),
+            ),
         )
-        # 触发校验
-        from core.config import validate
-
         validate(cfg)
         return cfg
 
-    def _save(self) -> None:
+    def _save_config(self) -> None:
         try:
-            cfg = self._form_to_config()
+            cfg = self._read_form_config()
             save_config(cfg, CONFIG_PATH)
         except ConfigError as exc:
             messagebox.showerror("配置错误", str(exc))
             return
-        self._log("配置已保存: %s" % CONFIG_PATH)
-        messagebox.showinfo("已保存", "配置已保存到 %s" % CONFIG_PATH)
+        self._refresh_run_summary()
+        self._log("配置已保存：%s" % CONFIG_PATH)
+        messagebox.showinfo("已保存", "配置已保存到：\n%s" % CONFIG_PATH)
 
-    def _browse_output(self) -> None:
-        chosen = filedialog.askdirectory(initialdir=str(BASE_DIR))
-        if chosen:
-            self._vars["output_dir"].set(chosen)
-
-    # ---------------------------------------------------------- 运行
-    def _run(self) -> None:
+    # ---------------------------------------------------------------- run
+    def _start_run(self) -> None:
         if self.running:
             return
         try:
-            cfg = self._form_to_config()
+            cfg = self._read_form_config()
             save_config(cfg, CONFIG_PATH)
         except ConfigError as exc:
             messagebox.showerror("配置错误", str(exc))
@@ -300,20 +677,22 @@ class App:
 
         self.running = True
         self.cancel_event.clear()
+        self.last_run_dir = None
         self.btn_run.config(state="disabled")
         self.btn_cancel.config(state="normal")
-        self.btn_open.config(state="disabled")
         self.progress.start(12)
+        self.status_var.set("运行中…")
         self._log("=" * 60)
-        self._log("开始计算：%.3f–%.3f μm" %
-                 (cfg.band.wavelength_min_um, cfg.band.wavelength_max_um))
+        self._log(
+            "开始计算：%.3f–%.3f μm"
+            % (cfg.band.wavelength_min_um, cfg.band.wavelength_max_um)
+        )
+        self._show("run")
         threading.Thread(target=self._worker, args=(cfg,), daemon=True).start()
 
     def _worker(self, cfg: Config) -> None:
         try:
-            run_dir, files = run_pipeline(
-                cfg, self._log, self.cancel_event
-            )
+            run_dir, files = run_pipeline(cfg, self._log, self.cancel_event)
             self.q.put(("done", run_dir))
         except CancelledError as exc:
             self.q.put(("cancelled", str(exc)))
@@ -324,67 +703,58 @@ class App:
 
     def _cancel(self) -> None:
         self.cancel_event.set()
-        self._log("正在取消...")
+        self._log("正在取消…")
 
-    def _log(self, message: str) -> None:
-        self.q.put(("log", message))
-        logger.info(message)
+    def _log(self, message: str, level: int = logging.INFO) -> None:
+        self.q.put(("log", level, message))
+        logger.log(level, message)
 
-    # ---------------------------------------------------------- 队列
+    def _on_print(self, level: int, message: str) -> None:
+        self.q.put(("log", level, message))
+
+    # ---------------------------------------------------------------- queue
     def _poll(self) -> None:
         try:
             while True:
-                kind, payload = self.q.get_nowait()
+                item = self.q.get_nowait()
+                kind = item[0]
                 if kind == "log":
-                    self._append_log(payload)
+                    self._append_log(item[1], item[2])
                 elif kind == "done":
-                    self._on_done(payload)
+                    self._on_done(item[1])
                 elif kind == "cancelled":
-                    self._append_log("已取消: %s" % payload)
+                    self._log("已取消：%s" % item[1])
                 elif kind == "error":
-                    self._on_error(payload)
+                    self._on_error(item[1])
                 elif kind == "stopped":
                     self._on_stopped()
         except queue.Empty:
             pass
         self.root.after(120, self._poll)
 
-    def _append_log(self, message: str) -> None:
-        self.log_text.config(state="normal")
-        self.log_text.insert("end", message + "\n")
-        self.log_text.see("end")
-        self.log_text.config(state="disabled")
-
     def _on_done(self, run_dir: Path) -> None:
         self.last_run_dir = Path(run_dir)
-        self._append_log("仿真完成，输出目录: %s" % run_dir)
-        messagebox.showinfo("完成", "计算完成。\n输出目录:\n%s" % run_dir)
+        self.status_var.set("完成：%s" % run_dir)
+        self._log("仿真完成，输出目录：%s" % run_dir)
+        messagebox.showinfo("完成", "计算完成。\n输出目录：\n%s" % run_dir)
 
     def _on_error(self, tb: str) -> None:
-        self._append_log(tb)
+        self.status_var.set("运行失败")
+        self._log(tb, logging.ERROR)
         logger.error(tb)
-        messagebox.showerror(
-            "运行失败", "计算过程中出错，详情见日志区与 logs 目录下的日志文件。"
-        )
+        messagebox.showerror("运行失败", "计算过程中出错，详情见“日志预览”页与 logs 目录。")
 
     def _on_stopped(self) -> None:
         self.running = False
         self.progress.stop()
         self.btn_run.config(state="normal")
         self.btn_cancel.config(state="disabled")
-        self.btn_open.config(state="normal" if self.last_run_dir else "disabled")
-
-    def _open_output(self) -> None:
-        target = self.last_run_dir or get_output_dir(
-            load_config(CONFIG_PATH), BASE_DIR
-        )
-        if target.exists():
-            os.startfile(str(target))
-        else:
-            messagebox.showinfo("提示", "输出目录尚不存在: %s" % target)
+        if self.status_var.get().startswith("运行中"):
+            self.status_var.set("就绪")
 
 
 def main() -> None:
+    enable_dpi_awareness()
     root = tk.Tk()
     App(root)
     root.mainloop()
