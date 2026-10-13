@@ -67,4 +67,5 @@ pyinstaller build.spec
 
 产物在 `dist/hapi_transmittance/`，双击 `hapi_transmittance.exe` 运行。
 默认 `console=False`（无黑窗口）。排查问题时可在 `build.spec` 中把 `console` 改为 `True` 重新打包。
-配置、缓存、输出默认都放在 exe 所在目录；请勿把程序放进无写权限的目录（如 Program Files）。
+配置、缓存、输出默认都放在 exe 所在目录；若程序被放到 Program Files 等无写权限目录，
+会自动回退到 `%LOCALAPPDATA%\hapi-transmittance`。

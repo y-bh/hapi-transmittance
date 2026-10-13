@@ -117,6 +117,35 @@ def get_base_dir() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _is_writable_dir(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / (".write_test_%d.tmp" % os.getpid())
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def get_data_dir(base_dir: Optional[Path] = None) -> Path:
+    """可写的数据根目录：优先程序/项目所在目录，不可写则回退到 %LOCALAPPDATA%。"""
+    base_dir = base_dir or get_base_dir()
+    if _is_writable_dir(base_dir):
+        return base_dir
+    local = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "hapi-transmittance"
+    try:
+        local.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return base_dir
+    return local
+
+
+def get_config_path(base_dir: Optional[Path] = None) -> Path:
+    """配置文件的默认路径（位于可写的数据根目录下）。"""
+    return get_data_dir(base_dir) / "config.json"
+
+
 def _resolve(base_dir: Path, value: str) -> Path:
     p = Path(value)
     if not p.is_absolute():
@@ -125,8 +154,7 @@ def _resolve(base_dir: Path, value: str) -> Path:
 
 
 def get_cache_dir(cfg: Config, base_dir: Optional[Path] = None) -> Path:
-    base_dir = base_dir or get_base_dir()
-    return _resolve(base_dir, cfg.paths.cache_dir)
+    return _resolve(get_data_dir(base_dir), cfg.paths.cache_dir)
 
 
 def get_output_dir(
@@ -134,10 +162,9 @@ def get_output_dir(
     base_dir: Optional[Path] = None,
     override: Optional[str] = None,
 ) -> Path:
-    base_dir = base_dir or get_base_dir()
     if override:
-        return _resolve(base_dir, override)
-    return _resolve(base_dir, cfg.paths.output_dir)
+        return _resolve(get_data_dir(base_dir), override)
+    return _resolve(get_data_dir(base_dir), cfg.paths.output_dir)
 
 
 def default_config() -> Config:

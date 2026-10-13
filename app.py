@@ -17,6 +17,8 @@ from core.config import (
     ConfigError,
     ensure_config_exists,
     get_base_dir,
+    get_config_path,
+    get_data_dir,
     get_output_dir,
     load_config,
 )
@@ -44,7 +46,14 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     base_dir = get_base_dir()
-    config_path = Path(args.config) if args.config else base_dir / "config.json"
+    data_dir = get_data_dir(base_dir)
+    config_path = Path(args.config) if args.config else get_config_path(base_dir)
+
+    if data_dir != base_dir:
+        print(
+            "注意：程序目录不可写，配置/缓存/输出/日志将保存到 %s" % data_dir,
+            file=sys.stderr,
+        )
 
     try:
         created = ensure_config_exists(config_path)

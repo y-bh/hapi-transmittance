@@ -26,6 +26,8 @@ from core.config import (
     SLIT_FUNCTIONS,
     ensure_config_exists,
     get_base_dir,
+    get_config_path,
+    get_data_dir,
     get_output_dir,
     load_config,
     save_config,
@@ -35,12 +37,16 @@ from core.logging_setup import capture_print_output, setup_logging
 
 
 BASE_DIR = get_base_dir()
-CONFIG_PATH = BASE_DIR / "config.json"
-LOG_DIR = BASE_DIR / "logs"
+DATA_DIR = get_data_dir(BASE_DIR)
+CONFIG_PATH = get_config_path(BASE_DIR)
+LOG_DIR = DATA_DIR / "logs"
 
 # 先建好日志并接管 print，再导入 pipeline（其内部会 import hapi 并打印 banner）
 logger = setup_logging(LOG_DIR)
 capture_print_output(logger)
+
+if DATA_DIR != BASE_DIR:
+    logger.warning("程序目录不可写，配置/缓存/输出/日志将保存到 %s", DATA_DIR)
 
 from core.pipeline import run_pipeline  # noqa: E402
 
