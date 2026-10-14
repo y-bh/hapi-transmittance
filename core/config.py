@@ -80,6 +80,19 @@ class OutputConfig:
 
 
 @dataclass
+class PathScanConfig:
+    """光程-透过率（全波段 T(λ, L)）计算参数。"""
+
+    laser_linewidth_cm1: float = 0.01  # 激光线宽 FWHM (cm^-1)，高斯型
+    linewidth_shape: str = "gaussian"
+    wavelength_points: int = 200      # 全波段波长采样点数
+    distance_min_cm: float = 0.0
+    distance_max_cm: float = 1_000_000.0
+    distance_points: int = 200
+    distance_scale: str = "linear"    # linear | log
+
+
+@dataclass
 class Config:
     band: BandConfig
     simulation: SimulationConfig
@@ -89,6 +102,7 @@ class Config:
     network: NetworkConfig
     paths: PathsConfig
     output: OutputConfig
+    path_scan: PathScanConfig
 
     @property
     def wavenumber_min(self) -> float:
@@ -189,6 +203,7 @@ def default_config() -> Config:
         network=NetworkConfig(),
         paths=PathsConfig(),
         output=OutputConfig(),
+        path_scan=PathScanConfig(),
     )
 
 
@@ -221,6 +236,7 @@ def _build_config(raw: Dict[str, Any]) -> Config:
     net = raw.get("network", {})
     paths = raw.get("paths", {})
     out = raw.get("output", {})
+    ps = raw.get("path_scan", {})
 
     molecules_raw = raw.get("molecules", [])
     if not isinstance(molecules_raw, list):
@@ -302,6 +318,25 @@ def _build_config(raw: Dict[str, Any]) -> Config:
             save_txt=bool(out.get("save_txt", True)),
             png_dpi=_as_int(out.get("png_dpi", 300), "output.png_dpi"),
         ),
+        path_scan=PathScanConfig(
+            laser_linewidth_cm1=_as_float(
+                ps.get("laser_linewidth_cm-1", 0.01), "path_scan.laser_linewidth_cm-1"
+            ),
+            linewidth_shape=str(ps.get("linewidth_shape", "gaussian")),
+            wavelength_points=_as_int(
+                ps.get("wavelength_points", 200), "path_scan.wavelength_points"
+            ),
+            distance_min_cm=_as_float(
+                ps.get("distance_min_cm", 0.0), "path_scan.distance_min_cm"
+            ),
+            distance_max_cm=_as_float(
+                ps.get("distance_max_cm", 1_000_000.0), "path_scan.distance_max_cm"
+            ),
+            distance_points=_as_int(
+                ps.get("distance_points", 200), "path_scan.distance_points"
+            ),
+            distance_scale=str(ps.get("distance_scale", "linear")),
+        ),
     )
     validate(cfg)
     return cfg
@@ -339,6 +374,22 @@ def validate(cfg: Config) -> None:
         problems.append("network.timeout_s 必须大于 0")
     if cfg.network.max_retries < 0:
         problems.append("network.max_retries 不能为负")
+
+    ps = cfg.path_scan
+    if ps.laser_linewidth_cm1 <= 0:
+        problems.append("path_scan.laser_linewidth_cm-1 必须大于 0")
+    if ps.linewidth_shape != "gaussian":
+        problems.append("path_scan.linewidth_shape 目前只支持 gaussian")
+    if ps.wavelength_points < 2:
+        problems.append("path_scan.wavelength_points 至少为 2")
+    if ps.distance_points < 2:
+        problems.append("path_scan.distance_points 至少为 2")
+    if ps.distance_scale not in ("linear", "log"):
+        problems.append("path_scan.distance_scale 必须是 linear 或 log")
+    if ps.distance_max_cm <= 0:
+        problems.append("path_scan.distance_max_cm 必须大于 0")
+    if ps.distance_scale == "linear" and ps.distance_min_cm < 0:
+        problems.append("path_scan.distance_min_cm 不能为负")
 
     if problems:
         raise ConfigError("；".join(problems))

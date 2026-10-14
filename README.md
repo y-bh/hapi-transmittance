@@ -39,14 +39,15 @@ python app.py                # 命令行
 
 ```powershell
 python app.py --config config.json --output D:/results
+python app.py --mode pathscan          # 只计算光程-透过率矩阵
 ```
 
 ## GUI 使用
 
 界面采用「左侧导航 + 右侧功能页」布局：
 
-- 运行：查看当前参数摘要，开始 / 取消计算，查看进度。
-- 参数设置：编辑仿真参数、成分混合比、分子清单、网络与 API Key。
+- 波长-透过率：波长-透过率光谱计算，编辑仿真参数、成分混合比、分子清单、网络与 API Key，开始 / 取消计算。
+- 光程-透过率：独立计算全波段 T(λ, L)，编辑激光线宽、波长采样点数与距离范围，开始 / 取消计算。
 - 输出目录：设置输出目录（浏览 / 检查可写 / 打开目录），查看最近运行结果。
 - 日志预览：实时查看日志，按 INFO / WARNING / ERROR 过滤，支持清空与打开日志文件。
 - 关于：版本信息与引用，打开程序目录或配置文件。
@@ -110,6 +111,24 @@ python app.py --config config.json --output D:/results
 - `network`：代理开关、代理地址、API Key、超时与重试。API Key 也可用环境变量 `HITRAN_API_KEY` 提供；不填会以游客模式访问（每日限额较低）。
 - `paths`：谱线缓存目录与输出目录，相对路径以程序根目录为基准。
 - `output`：是否按时间戳分目录、是否保存 PNG/CSV/TXT、PNG 分辨率。
+- `path_scan`：全波段光程-透过率计算参数（见下）。
+
+`path_scan` 示例：
+
+```json
+{
+  "laser_linewidth_cm-1": 0.01,
+  "linewidth_shape": "gaussian",
+  "wavelength_points": 200,
+  "distance_min_cm": 0.0,
+  "distance_max_cm": 1000000.0,
+  "distance_points": 200,
+  "distance_scale": "linear"
+}
+```
+
+“运行”页和“光程曲线”页相互独立：前者计算波长-透过率光谱，后者对每个波长用高斯线宽加权，
+按 T(L)=∫g(ν)·exp(-k(ν)·L)dν 计算不同距离的透过率，结果分别输出到 `spectrum/` 与 `path_scan/` 子目录。
 
 ## 输出文件
 
@@ -122,6 +141,10 @@ python app.py --config config.json --output D:/results
 | `absorption_coefficient.txt` | 高分辨吸收系数（cm²/molecule） |
 | `transmittance_highres.txt` | 高分辨透过率 |
 | `hitran_data_cache/band_info.json` | 谱线缓存备注 |
+| `transmittance_vs_distance.csv` | 光程-透过率矩阵（行=距离，列=波长） |
+| `transmittance_vs_distance.png` | T(λ, L) 热图 |
+
+光谱结果写入 `output/spectrum/`，光程-透过率结果写入 `output/path_scan/`。
 
 ## 日志与排错
 

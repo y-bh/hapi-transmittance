@@ -25,6 +25,7 @@ from core.config import (
     Molecule,
     NetworkConfig,
     OutputConfig,
+    PathScanConfig,
     PathsConfig,
     SimulationConfig,
     SLIT_FUNCTIONS,
@@ -49,13 +50,13 @@ LOG_DIR = DATA_DIR / "logs"
 logger = setup_logging(LOG_DIR)
 capture_print_output(logger)
 
-from core.pipeline import run_pipeline  # noqa: E402
+from core.pipeline import run_path_scan_pipeline, run_spectrum_pipeline  # noqa: E402
 
 if DATA_DIR != BASE_DIR:
     logger.warning("程序目录不可写，配置/缓存/输出/日志将保存到 %s", DATA_DIR)
 
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.2.0"
 MAX_LOG_LINES = 5000
 
 # 配色：浅蓝 + 白
@@ -113,6 +114,7 @@ class App:
         self.q = queue.Queue()
         self.cancel_event = threading.Event()
         self.running = False
+        self.running_mode = None
         self.last_run_dir: Path | None = None
 
         self.log_lines = []  # [(level, text), ...]
@@ -243,7 +245,8 @@ class App:
         self.pages = {}
         self.nav_buttons = {}
         for key, label in (
-            ("run", "运行"),
+            ("run", "波长-透过率"),
+            ("pathscan", "光程-透过率"),
             ("output", "输出目录"),
             ("log", "日志预览"),
             ("about", "关于"),
@@ -268,6 +271,7 @@ class App:
             self.nav_buttons[key] = btn
 
         self.pages["run"] = self._build_run_page(self.content)
+        self.pages["pathscan"] = self._build_pathscan_page(self.content)
         self.pages["output"] = self._build_output_page(self.content)
         self.pages["log"] = self._build_log_page(self.content)
         self.pages["about"] = self._build_about_page(self.content)
@@ -293,13 +297,73 @@ class App:
         label.pack(anchor="w")
         return label
 
+    def _make_scrollable(self, parent):
+        canvas = tk.Canvas(parent, bg=BG_MAIN, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        inner = ttk.Frame(canvas, style="TFrame")
+        window = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window, width=e.width))
+        canvas.bind(
+            "<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units")
+        )
+        return canvas, inner
+
+    def _bind_wheel_recursive(self, widget, handler) -> None:
+        try:
+            widget.bind("<MouseWheel>", handler)
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            self._bind_wheel_recursive(child, handler)
+
     # ---------------------------------------------------------------- run page
     def _build_run_page(self, parent) -> ttk.Frame:
-        f = ttk.Frame(parent, padding=14)
-        self._heading(f, "运行与参数设置")
+        f = ttk.Frame(parent, padding=(14, 10))
+        self._heading(f, "波长-透过率（透过率谱 T(λ)）")
 
-        sim = ttk.Labelframe(f, text="仿真参数", padding=8)
-        sim.pack(fill="x", pady=(8, 6))
+        # 运行栏固定在最下方，与“光程-透过率”页保持一致，且窗口较小时也始终可见
+        runbar = ttk.Labelframe(f, text="运行", padding=8)
+        runbar.pack(side="bottom", fill="x", pady=(6, 0))
+        self.run_summary = ttk.Label(
+            runbar, text="", foreground=SUBTLE, justify="left"
+        )
+        self.run_summary.pack(anchor="w", fill="x")
+        self.progress = ttk.Progressbar(runbar, mode="indeterminate")
+        self.progress.pack(fill="x", pady=(6, 4))
+        row = ttk.Frame(runbar)
+        row.pack(anchor="w")
+        self.btn_run = ttk.Button(row, text="开始计算", command=self._start_spectrum)
+        self.btn_run.pack(side="left")
+        self.btn_cancel = ttk.Button(
+            row, text="取消", command=self._cancel, state="disabled"
+        )
+        self.btn_cancel.pack(side="left", padx=8)
+        ttk.Button(row, text="保存配置", command=self._save_config).pack(
+            side="left", padx=8
+        )
+        ttk.Button(row, text="打开输出目录", command=self._open_output_dir).pack(
+            side="left"
+        )
+
+        # 参数区放入可滚动区域
+        canvas, inner = self._make_scrollable(f)
+        self._build_run_params(inner)
+        self._bind_wheel_recursive(
+            inner, lambda e: canvas.yview_scroll(int(-e.delta / 120), "units")
+        )
+        return f
+
+    def _build_run_params(self, parent) -> None:
+        sim = ttk.Labelframe(parent, text="仿真参数", padding=8)
+        sim.pack(fill="x", pady=(0, 6))
         fields = [
             ("wavelength_min_um", "波长下限 (μm)", "8.9"),
             ("wavelength_max_um", "波长上限 (μm)", "11.0"),
@@ -326,8 +390,8 @@ class App:
             width=14,
         ).grid(row=5, column=1, sticky="w", pady=4)
 
-        mid = ttk.Frame(f)
-        mid.pack(fill="both", expand=True, pady=4)
+        mid = ttk.Frame(parent)
+        mid.pack(fill="x", pady=4)
         left = ttk.Labelframe(mid, text="成分体积混合比（name=value）")
         left.pack(side="left", fill="both", expand=True, padx=(0, 5))
         self.components_text = self._make_text(left)
@@ -338,7 +402,7 @@ class App:
         self.molecules_text = self._make_text(right)
         self.molecules_text.pack(fill="both", expand=True)
 
-        net = ttk.Labelframe(f, text="网络与 API Key", padding=8)
+        net = ttk.Labelframe(parent, text="网络与 API Key", padding=8)
         net.pack(fill="x", pady=4)
         self.vars["use_proxy"] = tk.BooleanVar(value=False)
         ttk.Checkbutton(net, text="启用代理", variable=self.vars["use_proxy"]).grid(
@@ -355,30 +419,6 @@ class App:
             row=1, column=2, sticky="we", pady=4
         )
         net.columnconfigure(2, weight=1)
-
-        runbar = ttk.Labelframe(f, text="运行", padding=8)
-        runbar.pack(fill="x", pady=(6, 0))
-        self.run_summary = ttk.Label(
-            runbar, text="", foreground=SUBTLE, justify="left"
-        )
-        self.run_summary.pack(anchor="w", fill="x")
-        self.progress = ttk.Progressbar(runbar, mode="indeterminate")
-        self.progress.pack(fill="x", pady=(6, 4))
-        row = ttk.Frame(runbar)
-        row.pack(anchor="w")
-        self.btn_run = ttk.Button(row, text="开始计算", command=self._start_run)
-        self.btn_run.pack(side="left")
-        self.btn_cancel = ttk.Button(
-            row, text="取消", command=self._cancel, state="disabled"
-        )
-        self.btn_cancel.pack(side="left", padx=8)
-        ttk.Button(row, text="保存配置", command=self._save_config).pack(
-            side="left", padx=8
-        )
-        ttk.Button(row, text="打开输出目录", command=self._open_output_dir).pack(
-            side="left"
-        )
-        return f
 
     def _make_text(self, parent) -> tk.Text:
         return tk.Text(
@@ -429,6 +469,92 @@ class App:
                 )
             )
         )
+
+    # ---------------------------------------------------------------- path scan page
+    def _build_pathscan_page(self, parent) -> ttk.Frame:
+        f = ttk.Frame(parent, padding=16)
+        self._heading(f, "光程-透过率（全波段 T(λ, L)）")
+
+        self.pathscan_vars = {}
+
+        laser = ttk.Labelframe(f, text="激光参数", padding=10)
+        laser.pack(fill="x", pady=6)
+        self.pathscan_vars["linewidth"] = tk.StringVar(value="0.01")
+        ttk.Label(laser, text="激光线宽 FWHM (cm⁻¹)").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Entry(laser, textvariable=self.pathscan_vars["linewidth"], width=18).grid(
+            row=0, column=1, sticky="w", padx=8
+        )
+        ttk.Label(
+            laser,
+            text="线型：高斯（默认）。1 cm⁻¹ ≈ 30 GHz；在 10 μm 处约对应 0.01 μm。",
+            foreground=SUBTLE,
+        ).grid(row=0, column=2, sticky="w", padx=12)
+
+        scan = ttk.Labelframe(f, text="扫描范围", padding=10)
+        scan.pack(fill="x", pady=6)
+        self.pathscan_vars["wavelength_points"] = tk.StringVar(value="200")
+        self.pathscan_vars["distance_min"] = tk.StringVar(value="0")
+        self.pathscan_vars["distance_max"] = tk.StringVar(value="1000000")
+        self.pathscan_vars["distance_points"] = tk.StringVar(value="200")
+        self.pathscan_vars["scale"] = tk.StringVar(value="linear")
+
+        rows = [
+            ("波长采样点数", "wavelength_points", 10),
+            ("距离下限 (cm)", "distance_min", 14),
+            ("距离上限 (cm)", "distance_max", 14),
+            ("距离点数", "distance_points", 10),
+        ]
+        for r, (label, key, width) in enumerate(rows):
+            ttk.Label(scan, text=label).grid(row=r, column=0, sticky="w", pady=4)
+            ttk.Entry(
+                scan, textvariable=self.pathscan_vars[key], width=width
+            ).grid(row=r, column=1, sticky="w", pady=4)
+        ttk.Label(scan, text="距离轴刻度").grid(
+            row=4, column=0, sticky="w", pady=4
+        )
+        ttk.Combobox(
+            scan,
+            textvariable=self.pathscan_vars["scale"],
+            values=("linear", "log"),
+            state="readonly",
+            width=10,
+        ).grid(row=4, column=1, sticky="w", pady=4)
+
+        ttk.Label(
+            f,
+            text=(
+                "说明：对整个波段等距采样激光中心波长，用高斯线宽对高分辨吸收系数加权，"
+                "按 T(L)=∫g(ν)·exp(-k(ν)·L)dν 计算每个波长在不同距离下的透过率，"
+                "输出 CSV 矩阵与热图 PNG。"
+            ),
+            foreground=SUBTLE,
+            wraplength=760,
+            justify="left",
+        ).pack(anchor="w", pady=(6, 0))
+
+        runbar = ttk.Labelframe(f, text="运行", padding=8)
+        runbar.pack(fill="x", pady=(10, 0))
+        self.pathscan_progress = ttk.Progressbar(runbar, mode="indeterminate")
+        self.pathscan_progress.pack(fill="x", pady=(0, 4))
+        row = ttk.Frame(runbar)
+        row.pack(anchor="w")
+        self.btn_pathscan_run = ttk.Button(
+            row, text="开始计算", command=self._start_pathscan
+        )
+        self.btn_pathscan_run.pack(side="left")
+        self.btn_pathscan_cancel = ttk.Button(
+            row, text="取消", command=self._cancel, state="disabled"
+        )
+        self.btn_pathscan_cancel.pack(side="left", padx=8)
+        ttk.Button(row, text="保存配置", command=self._save_config).pack(
+            side="left", padx=8
+        )
+        ttk.Button(row, text="打开输出目录", command=self._open_output_dir).pack(
+            side="left"
+        )
+        return f
 
     # ---------------------------------------------------------------- output page
     def _build_output_page(self, parent) -> ttk.Frame:
@@ -717,12 +843,32 @@ class App:
             "1.0", "\n".join("%s,%d,%d" % (m.name, m.M, m.I) for m in cfg.molecules)
         )
 
+        ps = cfg.path_scan
+        self.pathscan_vars["linewidth"].set(str(ps.laser_linewidth_cm1))
+        self.pathscan_vars["wavelength_points"].set(str(ps.wavelength_points))
+        self.pathscan_vars["distance_min"].set(str(ps.distance_min_cm))
+        self.pathscan_vars["distance_max"].set(str(ps.distance_max_cm))
+        self.pathscan_vars["distance_points"].set(str(ps.distance_points))
+        self.pathscan_vars["scale"].set(ps.distance_scale)
+
     def _read_form_config(self) -> Config:
         def num(key):
             try:
                 return float(self.vars[key].get())
             except (ValueError, KeyError):
                 raise ConfigError("字段 %s 不是数字" % key)
+
+        def num_ps(key):
+            try:
+                return float(self.pathscan_vars[key].get())
+            except (ValueError, KeyError):
+                raise ConfigError("光程曲线字段 %s 不是数字" % key)
+
+        def int_ps(key):
+            try:
+                return int(self.pathscan_vars[key].get())
+            except (ValueError, KeyError):
+                raise ConfigError("光程曲线字段 %s 不是整数" % key)
 
         cfg = Config(
             band=BandConfig(
@@ -754,6 +900,15 @@ class App:
             output=OutputConfig(
                 timestamped_subdir=self.timestamped_var.get(),
             ),
+            path_scan=PathScanConfig(
+                laser_linewidth_cm1=num_ps("linewidth"),
+                linewidth_shape="gaussian",
+                wavelength_points=int_ps("wavelength_points"),
+                distance_min_cm=num_ps("distance_min"),
+                distance_max_cm=num_ps("distance_max"),
+                distance_points=int_ps("distance_points"),
+                distance_scale=self.pathscan_vars["scale"].get(),
+            ),
         )
         validate(cfg)
         return cfg
@@ -770,7 +925,17 @@ class App:
         messagebox.showinfo("已保存", "配置已保存到：\n%s" % CONFIG_PATH)
 
     # ---------------------------------------------------------------- run
-    def _start_run(self) -> None:
+    def _start_spectrum(self) -> None:
+        self._start_worker(
+            run_spectrum_pipeline, "spectrum", "开始计算波长-透过率光谱"
+        )
+
+    def _start_pathscan(self) -> None:
+        self._start_worker(
+            run_path_scan_pipeline, "pathscan", "开始计算光程-透过率矩阵 T(λ, L)"
+        )
+
+    def _start_worker(self, pipeline_fn, mode: str, label: str) -> None:
         if self.running:
             return
         try:
@@ -781,22 +946,27 @@ class App:
             return
 
         self.running = True
+        self.running_mode = mode
         self.cancel_event.clear()
         self.last_run_dir = None
-        self.btn_run.config(state="disabled")
-        self.btn_cancel.config(state="normal")
-        self.progress.start(12)
+        if mode == "spectrum":
+            self.btn_run.config(state="disabled")
+            self.btn_cancel.config(state="normal")
+            self.progress.start(12)
+        else:
+            self.btn_pathscan_run.config(state="disabled")
+            self.btn_pathscan_cancel.config(state="normal")
+            self.pathscan_progress.start(12)
         self.status_var.set("运行中…")
         self._log("=" * 60)
-        self._log(
-            "开始计算：%.3f–%.3f μm"
-            % (cfg.band.wavelength_min_um, cfg.band.wavelength_max_um)
-        )
-        threading.Thread(target=self._worker, args=(cfg,), daemon=True).start()
+        self._log(label)
+        threading.Thread(
+            target=self._worker, args=(pipeline_fn, cfg), daemon=True
+        ).start()
 
-    def _worker(self, cfg: Config) -> None:
+    def _worker(self, pipeline_fn, cfg: Config) -> None:
         try:
-            run_dir, files = run_pipeline(cfg, self._log, self.cancel_event)
+            run_dir, files = pipeline_fn(cfg, self._log, self.cancel_event)
             self.q.put(("done", run_dir))
         except CancelledError as exc:
             self.q.put(("cancelled", str(exc)))
@@ -851,8 +1021,12 @@ class App:
     def _on_stopped(self) -> None:
         self.running = False
         self.progress.stop()
+        self.pathscan_progress.stop()
         self.btn_run.config(state="normal")
         self.btn_cancel.config(state="disabled")
+        self.btn_pathscan_run.config(state="normal")
+        self.btn_pathscan_cancel.config(state="disabled")
+        self.running_mode = None
         if self.status_var.get().startswith("运行中"):
             self.status_var.set("就绪")
 

@@ -47,5 +47,14 @@
     "save_csv": true,
     "save_txt": true,
     "png_dpi": 300
+  },
+  "path_scan": {
+    "laser_linewidth_cm-1": 0.01,
+    "linewidth_shape": "gaussian",
+    "wavelength_points": 200,
+    "distance_min_cm": 0.0,
+    "distance_max_cm": 1000000.0,
+    "distance_points": 200,
+    "distance_scale": "linear"
   }
 }

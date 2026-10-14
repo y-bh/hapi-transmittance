@@ -18,6 +18,13 @@ from .config import Config, get_output_dir
 LogFn = Callable[[str], None]
 
 
+def _run_dir(cfg: Config, out_root: Path, sub: str) -> Path:
+    base = out_root / sub
+    if cfg.output.timestamped_subdir:
+        return base / time.strftime("%Y%m%d_%H%M%S")
+    return base
+
+
 def export_results(
     cfg: Config,
     results: Dict[str, np.ndarray],
@@ -25,11 +32,7 @@ def export_results(
     output_dir_override: Optional[str] = None,
 ) -> Tuple[Path, List[Path]]:
     out_root = get_output_dir(cfg, override=output_dir_override)
-    run_dir = (
-        out_root / time.strftime("%Y%m%d_%H%M%S")
-        if cfg.output.timestamped_subdir
-        else out_root
-    )
+    run_dir = _run_dir(cfg, out_root, "spectrum")
     run_dir.mkdir(parents=True, exist_ok=True)
 
     files: List[Path] = []
@@ -138,6 +141,93 @@ def _make_figure(cfg: Config, results: Dict[str, np.ndarray], run_dir: Path) -> 
 
     fig.tight_layout()
     path = run_dir / "atmospheric_transmittance.png"
+    fig.savefig(path, dpi=cfg.output.png_dpi)
+    plt.close(fig)
+    return path
+
+
+def export_path_scan(
+    cfg: Config,
+    path_results: Dict[str, np.ndarray],
+    log: LogFn,
+    output_dir_override: Optional[str] = None,
+) -> Tuple[Path, List[Path]]:
+    """导出全波段光程-透过率矩阵：CSV 与热图 PNG。"""
+    out_root = get_output_dir(cfg, override=output_dir_override)
+    run_dir = _run_dir(cfg, out_root, "path_scan")
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    distances_cm = path_results["distances_cm"]
+    wavelengths_um = path_results["wavelengths_um"]
+    trans_map = path_results["transmittance"]  # 形状 (Nλ, N距离)
+
+    wavelengths_asc = np.asarray(wavelengths_um)[::-1]  # 波长从小到大
+    trans_asc = np.asarray(trans_map)[:, ::-1]          # 列与波长对齐
+    distance_m = np.asarray(distances_cm) / 100.0
+
+    files: List[Path] = []
+
+    if cfg.output.save_csv:
+        table = np.column_stack([distance_m, trans_asc.T])
+        header = "distance_m," + ",".join("%.6f" % w for w in wavelengths_asc)
+        p = run_dir / "transmittance_vs_distance.csv"
+        np.savetxt(p, table, delimiter=",", header=header, comments="")
+        files.append(p)
+
+    if cfg.output.save_png:
+        p = _make_path_scan_figure(cfg, path_results, run_dir)
+        files.append(p)
+
+    log("光程-透过率结果已写入目录: %s" % run_dir)
+    for f in files:
+        log("  - %s" % f.name)
+    return run_dir, files
+
+
+def _make_path_scan_figure(
+    cfg: Config,
+    path_results: Dict[str, np.ndarray],
+    run_dir: Path,
+) -> Path:
+    distances_m = np.asarray(path_results["distances_cm"]) / 100.0
+    wavelengths_um = np.asarray(path_results["wavelengths_um"])
+    trans_map = np.asarray(path_results["transmittance"])
+
+    data = trans_map[:, ::-1]  # 列按波长从小到大
+    extent = [
+        float(wavelengths_um[-1]),
+        float(wavelengths_um[0]),
+        float(distances_m[0]),
+        float(distances_m[-1]),
+    ]
+
+    fig, ax = plt.subplots(figsize=(11, 7))
+    im = ax.imshow(
+        data,
+        aspect="auto",
+        origin="lower",
+        extent=extent,
+        cmap="viridis",
+        interpolation="nearest",
+        vmin=0.0,
+        vmax=1.0,
+    )
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Transmittance")
+    ax.set_xlabel("Wavelength (μm)")
+    ax.set_ylabel("Distance (m)")
+    if cfg.path_scan.distance_scale == "log":
+        ax.set_yscale("log")
+    ax.set_title(
+        "Transmittance vs Distance (%.3f–%.3f μm, laser FWHM=%.3g cm$^{-1}$)"
+        % (
+            cfg.band.wavelength_min_um,
+            cfg.band.wavelength_max_um,
+            cfg.path_scan.laser_linewidth_cm1,
+        )
+    )
+    fig.tight_layout()
+    path = run_dir / "transmittance_vs_distance.png"
     fig.savefig(path, dpi=cfg.output.png_dpi)
     plt.close(fig)
     return path

@@ -4,6 +4,7 @@
     python app.py
     python app.py --config config.json
     python app.py --output D:/results
+    python app.py --mode pathscan
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from core.config import (
     load_config,
 )
 from core.logging_setup import capture_print_output, setup_logging
-from core.pipeline import run_pipeline
+from core.pipeline import run_path_scan_pipeline, run_spectrum_pipeline
 
 
 EXIT_OK = 0
@@ -42,6 +43,12 @@ def main(argv=None) -> int:
         "--output",
         default=None,
         help="输出目录（覆盖配置文件中的 paths.output_dir）",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("spectrum", "pathscan"),
+        default="spectrum",
+        help="计算模式：spectrum=波长-透过率，pathscan=光程-透过率（默认 spectrum）",
     )
     args = parser.parse_args(argv)
 
@@ -75,9 +82,14 @@ def main(argv=None) -> int:
              cfg.wavenumber_min, cfg.wavenumber_max)
 
     try:
-        run_dir, files = run_pipeline(
-            cfg, log.info, output_dir_override=args.output
-        )
+        if args.mode == "pathscan":
+            run_dir, files = run_path_scan_pipeline(
+                cfg, log.info, output_dir_override=args.output
+            )
+        else:
+            run_dir, files = run_spectrum_pipeline(
+                cfg, log.info, output_dir_override=args.output
+            )
         log.info("仿真完成，输出目录: %s", run_dir)
         return EXIT_OK
     except Exception:
