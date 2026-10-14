@@ -2,6 +2,13 @@
 
 基于 HITRAN 数据库与 HAPI 库，计算指定波段的大气透过率曲线。提供图形界面、外部配置文件和运行日志，支持打包成免安装 exe，并可通过 GitHub Actions 自动构建与发布 Release。
 
+## 技术栈
+
+- 界面：PySide6（Qt for Python），支持半透明磨砂玻璃效果
+- 数值：NumPy、Matplotlib
+- 数据：HITRAN API（requests 下载并本地缓存）
+- 打包：PyInstaller（--onedir）
+
 ## 功能
 
 - 从 HITRAN 下载逐线光谱数据并本地缓存，自动复用。
