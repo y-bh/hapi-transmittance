@@ -82,6 +82,14 @@ def enable_dpi_awareness() -> None:
             pass
 
 
+def _icon_path() -> Path:
+    """窗口图标路径：源码模式取项目根目录，打包后取捆绑目录。"""
+    if getattr(sys, "frozen", False):
+        base = Path(getattr(sys, "_MEIPASS", str(BASE_DIR)))
+        return base / "icon.ico"
+    return BASE_DIR / "icon.ico"
+
+
 def _parse_components(text: str) -> dict:
     out = {}
     for line in text.splitlines():
@@ -1034,6 +1042,12 @@ class App:
 def main() -> None:
     enable_dpi_awareness()
     root = tk.Tk()
+    icon = _icon_path()
+    if icon.exists():
+        try:
+            root.iconbitmap(str(icon))
+        except Exception:
+            pass
     App(root)
     root.mainloop()
 

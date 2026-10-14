@@ -8,11 +8,15 @@
     pyinstaller build.spec
 """
 
+import os
+
 from PyInstaller.utils.hooks import collect_all
 
 datas = []
 binaries = []
 hiddenimports = []
+
+datas += [(os.path.join(SPECPATH, "icon.ico"), ".")]
 
 for _pkg in ("matplotlib", "numpy"):
     _d, _b, _h = collect_all(_pkg)
@@ -60,7 +64,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    icon=os.path.join(SPECPATH, "icon.ico"),
 )
 
 coll = COLLECT(
